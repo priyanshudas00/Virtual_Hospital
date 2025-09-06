@@ -42,10 +42,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Check if Supabase is properly configured before attempting connection
+    if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
+      console.error('Supabase configuration is missing. Please check your .env file.');
+      setLoading(false);
+      return;
+    }
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session }, error }) => {
       if (error) {
-        console.error('Error getting session:', error);
+        console.error('Error getting session (check Supabase configuration):', error);
         setLoading(false);
         return;
       }
@@ -56,7 +63,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setLoading(false);
       }
     }).catch((error) => {
-      console.error('Failed to get session:', error);
+      console.error('Failed to get session (network or configuration error):', error);
       setLoading(false);
     });
 
