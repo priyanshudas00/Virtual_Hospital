@@ -10,6 +10,9 @@ import {
   AlertTriangle, 
   BarChart3,
   Menu,
+  FileText,
+  Upload,
+  MapPin,
   X,
   LogOut,
   User as UserIcon
@@ -27,7 +30,10 @@ export const Header: React.FC = () => {
     { name: 'Imaging', href: '/imaging', icon: Brain },
     { name: 'Lab Results', href: '/lab-results', icon: Activity },
     { name: 'Treatment', href: '/treatment', icon: Heart },
+    { name: 'Intake Form', href: '/intake-form', icon: FileText },
+    { name: 'Upload Reports', href: '/upload-reports', icon: Upload },
     { name: 'Emergency', href: '/emergency', icon: AlertTriangle },
+    { name: 'Find Healthcare', href: '/find-healthcare', icon: MapPin },
     { name: 'Admin', href: '/admin-dashboard', icon: BarChart3 }
   ];
 

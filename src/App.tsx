@@ -8,6 +8,9 @@ import { ImagingPage } from './pages/ImagingPage';
 import { LabResultsPage } from './pages/LabResultsPage';
 import { TreatmentPage } from './pages/TreatmentPage';
 import { EmergencyPage } from './pages/EmergencyPage';
+import { IntakeFormPage } from './pages/IntakeFormPage';
+import { UploadReportsPage } from './pages/UploadReportsPage';
+import { FindHealthcarePage } from './pages/FindHealthcarePage';
 import { DashboardPage } from './pages/DashboardPage';
 import { AuthPage } from './pages/AuthPage';
 import { AppointmentBookingPage } from './pages/AppointmentBookingPage';
@@ -62,6 +65,21 @@ const AppContent: React.FC = () => {
           </ProtectedRoute>
         } />
         <Route path="/emergency" element={<EmergencyPage />} />
+        <Route path="/intake-form" element={
+          <ProtectedRoute>
+            <IntakeFormPage />
+          </ProtectedRoute>
+        } />
+        <Route path="/upload-reports" element={
+          <ProtectedRoute>
+            <UploadReportsPage />
+          </ProtectedRoute>
+        } />
+        <Route path="/find-healthcare" element={
+          <ProtectedRoute>
+            <FindHealthcarePage />
+          </ProtectedRoute>
+        } />
         <Route path="/dashboard" element={
           <ProtectedRoute>
             <PatientDashboardPage />
