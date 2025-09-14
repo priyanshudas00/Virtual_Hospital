@@ -1,469 +1,378 @@
 import os
-import json
+import sys
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from pymongo import MongoClient
-from bson import ObjectId
 import bcrypt
-import google.generativeai as genai
-from PIL import Image
-import PyPDF2
-import pytesseract
-import cv2
-import numpy as np
-from io import BytesIO
-import base64
-import stripe
-from twilio.rest import Client
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
-import requests
-from werkzeug.utils import secure_filename
-from dotenv import load_dotenv
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import json
+from bson import ObjectId
+import traceback
 
-# Load environment variables
-load_dotenv()
+# Add project root to Python path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Import custom modules
+from config.database import db_manager
+from services.gemini_service import gemini_service
+from services.file_processor import file_processor
+from services.healthcare_finder import healthcare_finder
+from models.patient import PatientModel
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET')
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Initialize extensions
-CORS(app)
+CORS(app, origins=["http://localhost:5173", "https://localhost:5173"])
 jwt = JWTManager(app)
 
-# Initialize external services
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
-twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+# Initialize database connections
+try:
+    db_manager.connect_mongodb()
+    db_manager.connect_redis()
+    logger.info("🏥 Database connections established")
+except Exception as e:
+    logger.error(f"❌ Database connection failed: {e}")
+    sys.exit(1)
 
-# MongoDB connection
-client = MongoClient(os.getenv('MONGODB_URI'))
-db = client.virtualHospital
+# Initialize patient model
+patient_model = PatientModel(db_manager)
 
-# Collections
-users_collection = db.users
-intake_forms_collection = db.intake_forms
-ai_reports_collection = db.ai_reports
-medical_uploads_collection = db.medical_uploads
-doctors_collection = db.doctors
-hospitals_collection = db.hospitals
-appointments_collection = db.appointments
-payments_collection = db.payments
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Gemini AI Model
-model = genai.GenerativeModel('gemini-1.5-pro')
-
-class VirtualHospitalAI:
-    def __init__(self):
-        self.model = model
-        
-    def generate_medical_prompt(self, patient_data, context="initial_assessment"):
-        """Generate comprehensive medical prompt for Gemini API"""
-        
-        base_prompt = f"""
-        You are an advanced AI medical assistant providing preliminary health assessment. 
-        IMPORTANT: This is NOT a replacement for professional medical care.
-        
-        Patient Information:
-        - Age: {patient_data.get('age', 'Not provided')}
-        - Gender: {patient_data.get('gender', 'Not provided')}
-        - Location: {patient_data.get('location', 'Not provided')}
-        
-        Current Symptoms: {patient_data.get('symptoms', 'None reported')}
-        
-        Medical History: {patient_data.get('medical_history', 'None reported')}
-        
-        Current Medications: {patient_data.get('medications', 'None reported')}
-        
-        Allergies: {patient_data.get('allergies', 'None reported')}
-        
-        Lifestyle Factors:
-        - Sleep: {patient_data.get('sleep_hours', 'Not provided')} hours
-        - Exercise: {patient_data.get('exercise', 'Not provided')}
-        - Diet: {patient_data.get('diet', 'Not provided')}
-        - Smoking: {patient_data.get('smoking', 'Not provided')}
-        - Alcohol: {patient_data.get('alcohol', 'Not provided')}
-        
-        Insurance/Financial: {patient_data.get('insurance', 'Not provided')}
-        
-        Please provide a comprehensive assessment in the following structured format:
-        
-        1. PRELIMINARY ASSESSMENT:
-        - Likely health conditions based on symptoms and history
-        - Urgency level: EMERGENCY / URGENT / ROUTINE / MONITORING
-        - Mental health risk assessment if applicable
-        
-        2. CLINICAL ANALYSIS:
-        - Probable causes and differential diagnosis
-        - Risk factors identified
-        - Symptom pattern analysis
-        
-        3. RECOMMENDED INVESTIGATIONS:
-        - Essential lab tests and imaging
-        - Specialized consultations needed
-        - Monitoring parameters
-        
-        4. LIFESTYLE RECOMMENDATIONS:
-        - Personalized diet modifications
-        - Exercise and activity guidelines
-        - Sleep hygiene improvements
-        - Stress management techniques
-        
-        5. MEDICATION GUIDANCE:
-        - Over-the-counter options (if appropriate)
-        - Prescription medication categories that may be needed
-        - Drug interaction warnings
-        - NOTE: Actual prescriptions require licensed physician
-        
-        6. REFERRAL RECOMMENDATIONS:
-        - Specialist consultations needed
-        - Urgency of referrals
-        - Preparation for appointments
-        
-        7. PATIENT EDUCATION:
-        - Condition explanation in simple terms
-        - Warning signs requiring immediate attention
-        - Self-care strategies
-        
-        8. FOLLOW-UP PLAN:
-        - Recommended timeline for reassessment
-        - Symptom tracking suggestions
-        - Progress monitoring indicators
-        
-        Provide detailed, evidence-based, and patient-friendly explanations.
-        Always emphasize the importance of professional medical consultation.
-        """
-        
-        return base_prompt
-    
-    def analyze_medical_report(self, report_text, patient_context):
-        """Analyze uploaded medical reports"""
-        
-        prompt = f"""
-        You are analyzing a medical report for a patient. Provide comprehensive analysis.
-        
-        Patient Context: {patient_context}
-        
-        Medical Report Content:
-        {report_text}
-        
-        Please analyze and provide:
-        
-        1. REPORT SUMMARY:
-        - Key findings and abnormalities
-        - Normal vs abnormal values
-        - Critical results requiring attention
-        
-        2. CLINICAL INTERPRETATION:
-        - What these results mean for the patient
-        - Correlation with symptoms and history
-        - Progression from previous reports (if mentioned)
-        
-        3. UPDATED ASSESSMENT:
-        - Confirmed or ruled out conditions
-        - New diagnostic possibilities
-        - Risk stratification
-        
-        4. RECOMMENDED ACTIONS:
-        - Immediate steps needed
-        - Follow-up tests required
-        - Lifestyle modifications
-        - Medication adjustments (general categories)
-        
-        5. PATIENT COMMUNICATION:
-        - Explain results in simple terms
-        - Address likely patient concerns
-        - Reassurance or caution as appropriate
-        
-        6. NEXT STEPS:
-        - Specialist referrals needed
-        - Timeline for follow-up
-        - Monitoring requirements
-        
-        Provide clear, accurate, and compassionate analysis.
-        """
-        
-        return prompt
-    
-    async def get_ai_assessment(self, prompt):
-        """Get AI assessment from Gemini"""
-        try:
-            response = self.model.generate_content(prompt)
-            return {
-                'success': True,
-                'assessment': response.text,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-
-# Initialize AI assistant
-ai_assistant = VirtualHospitalAI()
+# Thread pool for async operations
+executor = ThreadPoolExecutor(max_workers=10)
 
 # Utility functions
-def hash_password(password):
+def hash_password(password: str) -> bytes:
+    """Hash password using bcrypt"""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
-def check_password(password, hashed):
+def check_password(password: str, hashed: bytes) -> bool:
+    """Check password against hash"""
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
-def extract_text_from_pdf(file_path):
-    """Extract text from PDF files"""
-    try:
-        with open(file_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-        return text
-    except Exception as e:
-        logger.error(f"PDF extraction error: {e}")
-        return None
-
-def extract_text_from_image(image_path):
-    """Extract text from images using OCR"""
-    try:
-        image = cv2.imread(image_path)
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(gray)
-        return text
-    except Exception as e:
-        logger.error(f"OCR extraction error: {e}")
-        return None
-
-def find_nearby_healthcare(location, condition_urgency, financial_capability):
-    """Find nearby doctors and hospitals"""
-    try:
-        geolocator = Nominatim(user_agent="virtual_hospital")
-        location_data = geolocator.geocode(location)
-        
-        if not location_data:
-            return []
-        
-        # Query hospitals and doctors from database
-        query = {
-            'location': {
-                '$near': {
-                    '$geometry': {
-                        'type': 'Point',
-                        'coordinates': [location_data.longitude, location_data.latitude]
-                    },
-                    '$maxDistance': 50000  # 50km radius
-                }
-            }
-        }
-        
-        # Add financial filters
-        if financial_capability == 'low':
-            query['cost_category'] = {'$in': ['low', 'government']}
-        elif financial_capability == 'medium':
-            query['cost_category'] = {'$in': ['low', 'medium']}
-        
-        # Add urgency filters
-        if condition_urgency == 'EMERGENCY':
-            query['emergency_services'] = True
-        
-        hospitals = list(hospitals_collection.find(query).limit(10))
-        doctors = list(doctors_collection.find(query).limit(10))
-        
-        return {
-            'hospitals': hospitals,
-            'doctors': doctors,
-            'patient_location': {
-                'latitude': location_data.latitude,
-                'longitude': location_data.longitude
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Healthcare finder error: {e}")
-        return []
+def serialize_mongo_doc(doc):
+    """Convert MongoDB document to JSON serializable format"""
+    if isinstance(doc, dict):
+        for key, value in doc.items():
+            if isinstance(value, ObjectId):
+                doc[key] = str(value)
+            elif isinstance(value, datetime):
+                doc[key] = value.isoformat()
+            elif isinstance(value, dict):
+                doc[key] = serialize_mongo_doc(value)
+            elif isinstance(value, list):
+                doc[key] = [serialize_mongo_doc(item) if isinstance(item, dict) else item for item in value]
+    return doc
 
 # Authentication Routes
 @app.route('/api/auth/register', methods=['POST'])
 def register():
+    """Register new user with comprehensive profile"""
     try:
         data = request.json
         
+        # Validate required fields
+        required_fields = ['email', 'password', 'firstName', 'lastName']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+        
         # Check if user exists
+        users_collection = db_manager.get_collection('users')
         if users_collection.find_one({'email': data['email']}):
             return jsonify({'error': 'User already exists'}), 400
         
         # Hash password
         hashed_password = hash_password(data['password'])
         
-        # Create user
+        # Create comprehensive user profile
         user_data = {
             'email': data['email'],
             'password': hashed_password,
-            'first_name': data.get('firstName', ''),
-            'last_name': data.get('lastName', ''),
-            'role': data.get('role', 'patient'),
-            'phone': data.get('phone', ''),
-            'date_of_birth': data.get('dateOfBirth', ''),
-            'emergency_contact': data.get('emergencyContact', ''),
-            'insurance_provider': data.get('insuranceProvider', ''),
-            'insurance_number': data.get('insuranceNumber', ''),
+            'personal_info': {
+                'first_name': data['firstName'],
+                'last_name': data['lastName'],
+                'phone': data.get('phone', ''),
+                'date_of_birth': data.get('dateOfBirth', ''),
+                'gender': data.get('gender', ''),
+                'address': data.get('address', ''),
+                'emergency_contact': data.get('emergencyContact', '')
+            },
+            'medical_info': {
+                'blood_type': data.get('bloodType', ''),
+                'height': data.get('height', 0),
+                'weight': data.get('weight', 0),
+                'allergies': data.get('allergies', []),
+                'chronic_conditions': data.get('chronicConditions', []),
+                'current_medications': data.get('currentMedications', []),
+                'family_history': data.get('familyHistory', [])
+            },
+            'insurance_info': {
+                'provider': data.get('insuranceProvider', ''),
+                'policy_number': data.get('insuranceNumber', ''),
+                'coverage_type': data.get('coverageType', ''),
+                'financial_capability': data.get('financialCapability', 'medium')
+            },
+            'preferences': {
+                'language': data.get('preferredLanguage', 'English'),
+                'communication_method': data.get('communicationMethod', 'email'),
+                'privacy_level': data.get('privacyLevel', 'standard')
+            },
+            'account_info': {
+                'role': data.get('role', 'patient'),
+                'account_status': 'active',
+                'email_verified': False,
+                'profile_completion': 0.6  # Initial completion based on registration data
+            },
             'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
+            'updated_at': datetime.utcnow(),
+            'last_login': None
         }
         
         result = users_collection.insert_one(user_data)
         
         # Create JWT token
-        access_token = create_access_token(identity=str(result.inserted_id))
+        access_token = create_access_token(
+            identity=str(result.inserted_id),
+            additional_claims={
+                'email': data['email'],
+                'role': user_data['account_info']['role']
+            }
+        )
         
         # Remove password from response
         user_data.pop('password')
         user_data['_id'] = str(result.inserted_id)
+        user_data = serialize_mongo_doc(user_data)
+        
+        logger.info(f"New user registered: {data['email']}")
         
         return jsonify({
+            'success': True,
             'token': access_token,
-            'user': user_data
+            'user': user_data,
+            'message': 'Registration successful'
         }), 201
         
     except Exception as e:
         logger.error(f"Registration error: {e}")
-        return jsonify({'error': 'Registration failed'}), 500
+        return jsonify({
+            'success': False,
+            'error': 'Registration failed',
+            'details': str(e)
+        }), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
+    """Authenticate user and return JWT token"""
     try:
         data = request.json
         
+        if not data.get('email') or not data.get('password'):
+            return jsonify({'error': 'Email and password are required'}), 400
+        
         # Find user
+        users_collection = db_manager.get_collection('users')
         user = users_collection.find_one({'email': data['email']})
+        
         if not user or not check_password(data['password'], user['password']):
             return jsonify({'error': 'Invalid credentials'}), 401
         
+        # Update last login
+        users_collection.update_one(
+            {'_id': user['_id']},
+            {'$set': {'last_login': datetime.utcnow()}}
+        )
+        
         # Create JWT token
-        access_token = create_access_token(identity=str(user['_id']))
+        access_token = create_access_token(
+            identity=str(user['_id']),
+            additional_claims={
+                'email': user['email'],
+                'role': user.get('account_info', {}).get('role', 'patient')
+            }
+        )
         
         # Remove password from response
         user.pop('password')
         user['_id'] = str(user['_id'])
+        user = serialize_mongo_doc(user)
+        
+        logger.info(f"User logged in: {data['email']}")
         
         return jsonify({
+            'success': True,
             'token': access_token,
-            'user': user
+            'user': user,
+            'message': 'Login successful'
         }), 200
         
     except Exception as e:
         logger.error(f"Login error: {e}")
-        return jsonify({'error': 'Login failed'}), 500
+        return jsonify({
+            'success': False,
+            'error': 'Login failed',
+            'details': str(e)
+        }), 500
 
 # Patient Intake Form Routes
 @app.route('/api/intake-form', methods=['POST'])
 @jwt_required()
 def submit_intake_form():
+    """Process comprehensive intake form with AI analysis"""
     try:
         user_id = get_jwt_identity()
         data = request.json
         
-        # Save intake form
-        intake_data = {
-            'user_id': ObjectId(user_id),
-            'basic_info': {
-                'age': data.get('age'),
-                'gender': data.get('gender'),
-                'location': data.get('location'),
-                'occupation': data.get('occupation')
-            },
+        logger.info(f"Processing intake form for user: {user_id}")
+        
+        # Save intake form to database
+        intake_form = asyncio.run(patient_model.save_intake_form(user_id, data))
+        
+        # Prepare data for Gemini AI analysis
+        patient_data = {
+            'user_id': user_id,
+            'age': data.get('age'),
+            'gender': data.get('gender'),
+            'location': data.get('location'),
+            'occupation': data.get('occupation'),
             'symptoms': data.get('symptoms', []),
-            'medical_history': data.get('medicalHistory', []),
-            'current_medications': data.get('currentMedications', []),
-            'allergies': data.get('allergies', []),
-            'lifestyle': {
-                'sleep_hours': data.get('sleepHours'),
-                'exercise': data.get('exercise'),
-                'diet': data.get('diet'),
-                'smoking': data.get('smoking'),
-                'alcohol': data.get('alcohol'),
-                'stress_level': data.get('stressLevel')
-            },
-            'insurance_info': {
-                'provider': data.get('insuranceProvider'),
-                'policy_number': data.get('policyNumber'),
-                'financial_capability': data.get('financialCapability')
-            },
-            'created_at': datetime.utcnow(),
-            'status': 'submitted'
+            'symptom_duration': data.get('symptom_duration'),
+            'pain_level': data.get('pain_level', 0),
+            'urgency': data.get('urgency', 'medium'),
+            'medical_history': data.get('medical_history', []),
+            'current_medications': data.get('current_medications', []),
+            'allergies': data.get('allergies_text', ''),
+            'surgeries': data.get('surgeries_text', ''),
+            'family_history': data.get('family_history_text', ''),
+            'sleep_hours': data.get('sleep_hours'),
+            'exercise': data.get('exercise'),
+            'diet': data.get('diet'),
+            'smoking': data.get('smoking'),
+            'alcohol': data.get('alcohol'),
+            'stress_level': data.get('stress_level'),
+            'insurance_provider': data.get('insurance_provider'),
+            'financial_capability': data.get('financial_capability')
         }
         
-        result = intake_forms_collection.insert_one(intake_data)
+        # Get AI assessment from Gemini
+        logger.info("Requesting AI assessment from Gemini...")
+        assessment_start_time = datetime.utcnow()
         
-        # Generate AI assessment
-        prompt = ai_assistant.generate_medical_prompt(data)
-        ai_response = await ai_assistant.get_ai_assessment(prompt)
+        ai_assessment = asyncio.run(gemini_service.get_initial_assessment(patient_data))
         
-        if ai_response['success']:
-            # Save AI report
-            ai_report = {
-                'user_id': ObjectId(user_id),
-                'intake_form_id': result.inserted_id,
-                'assessment': ai_response['assessment'],
-                'type': 'initial_assessment',
-                'created_at': datetime.utcnow()
-            }
-            
-            ai_report_result = ai_reports_collection.insert_one(ai_report)
-            
-            return jsonify({
-                'intake_form_id': str(result.inserted_id),
-                'ai_report_id': str(ai_report_result.inserted_id),
-                'assessment': ai_response['assessment']
-            }), 201
-        else:
-            return jsonify({
-                'intake_form_id': str(result.inserted_id),
-                'error': 'AI assessment failed',
-                'details': ai_response['error']
-            }), 201
-            
+        assessment_end_time = datetime.utcnow()
+        processing_time = (assessment_end_time - assessment_start_time).total_seconds()
+        
+        # Add processing metadata
+        if 'metadata' not in ai_assessment:
+            ai_assessment['metadata'] = {}
+        ai_assessment['metadata']['processing_time'] = processing_time
+        
+        # Save AI assessment to database
+        ai_report = asyncio.run(patient_model.save_ai_assessment(
+            user_id, 
+            str(intake_form['_id']), 
+            ai_assessment,
+            'initial_assessment'
+        ))
+        
+        logger.info(f"AI assessment completed in {processing_time:.2f} seconds")
+        
+        return jsonify({
+            'success': True,
+            'intake_form_id': str(intake_form['_id']),
+            'ai_report_id': str(ai_report['_id']),
+            'assessment_data': ai_assessment,
+            'processing_time': processing_time,
+            'message': 'Intake form processed successfully'
+        }), 201
+        
     except Exception as e:
-        logger.error(f"Intake form error: {e}")
-        return jsonify({'error': 'Failed to process intake form'}), 500
+        logger.error(f"Intake form processing failed: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to process intake form',
+            'details': str(e)
+        }), 500
 
-@app.route('/api/intake-forms', methods=['GET'])
+@app.route('/api/diagnosis-reports', methods=['GET'])
 @jwt_required()
-def get_intake_forms():
+def get_diagnosis_reports():
+    """Get all diagnosis reports for user"""
     try:
         user_id = get_jwt_identity()
         
-        forms = list(intake_forms_collection.find(
+        # Get AI reports from database
+        reports_collection = db_manager.get_collection('ai_reports')
+        reports = list(reports_collection.find(
             {'user_id': ObjectId(user_id)}
-        ).sort('created_at', -1))
+        ).sort('created_at', -1).limit(50))
         
-        # Convert ObjectId to string
-        for form in forms:
-            form['_id'] = str(form['_id'])
-            form['user_id'] = str(form['user_id'])
+        # Serialize reports
+        serialized_reports = [serialize_mongo_doc(report) for report in reports]
         
-        return jsonify(forms), 200
+        return jsonify({
+            'success': True,
+            'reports': serialized_reports,
+            'total_count': len(serialized_reports)
+        }), 200
         
     except Exception as e:
-        logger.error(f"Get intake forms error: {e}")
-        return jsonify({'error': 'Failed to retrieve forms'}), 500
+        logger.error(f"Failed to get diagnosis reports: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to retrieve reports',
+            'details': str(e)
+        }), 500
+
+@app.route('/api/diagnosis-reports/<report_id>', methods=['GET'])
+@jwt_required()
+def get_specific_diagnosis_report(report_id):
+    """Get specific diagnosis report"""
+    try:
+        user_id = get_jwt_identity()
+        
+        reports_collection = db_manager.get_collection('ai_reports')
+        report = reports_collection.find_one({
+            '_id': ObjectId(report_id),
+            'user_id': ObjectId(user_id)
+        })
+        
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+        
+        serialized_report = serialize_mongo_doc(report)
+        
+        return jsonify(serialized_report), 200
+        
+    except Exception as e:
+        logger.error(f"Failed to get specific report: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to retrieve report',
+            'details': str(e)
+        }), 500
 
 # Medical Report Upload Routes
 @app.route('/api/upload-medical-report', methods=['POST'])
 @jwt_required()
 def upload_medical_report():
+    """Upload and analyze medical reports with AI"""
     try:
         user_id = get_jwt_identity()
         
@@ -477,256 +386,360 @@ def upload_medical_report():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # Save file
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        # Save file securely
+        upload_dir = os.path.join('uploads', user_id)
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
+        file_path = os.path.join(upload_dir, filename)
         file.save(file_path)
         
-        # Extract text based on file type
-        extracted_text = ""
-        if filename.lower().endswith('.pdf'):
-            extracted_text = extract_text_from_pdf(file_path)
-        elif filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            extracted_text = extract_text_from_image(file_path)
+        logger.info(f"File uploaded: {file_path}")
         
-        # Get patient context
-        latest_intake = intake_forms_collection.find_one(
+        # Process file and extract text
+        extraction_result = file_processor.process_uploaded_file(file_path, report_type)
+        
+        if not extraction_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': extraction_result.get('error', 'File processing failed')
+            }), 400
+        
+        # Get patient context for AI analysis
+        intake_collection = db_manager.get_collection('intake_forms')
+        latest_intake = intake_collection.find_one(
             {'user_id': ObjectId(user_id)},
             sort=[('created_at', -1)]
         )
         
-        patient_context = ""
+        reports_collection = db_manager.get_collection('ai_reports')
+        latest_assessment = reports_collection.find_one(
+            {'user_id': ObjectId(user_id)},
+            sort=[('created_at', -1)]
+        )
+        
+        # Prepare context for AI analysis
+        patient_context = {}
         if latest_intake:
-            patient_context = f"""
-            Age: {latest_intake.get('basic_info', {}).get('age')}
-            Gender: {latest_intake.get('basic_info', {}).get('gender')}
-            Current symptoms: {latest_intake.get('symptoms')}
-            Medical history: {latest_intake.get('medical_history')}
-            Current medications: {latest_intake.get('current_medications')}
-            """
+            patient_context = {
+                'age': latest_intake.get('basic_info', {}).get('age'),
+                'gender': latest_intake.get('basic_info', {}).get('gender'),
+                'current_symptoms': latest_intake.get('symptoms', {}).get('primary_symptoms', []),
+                'medical_history': latest_intake.get('medical_history', {}),
+                'current_medications': latest_intake.get('medical_history', {}).get('current_medications', [])
+            }
         
-        # Generate AI analysis
-        prompt = ai_assistant.analyze_medical_report(extracted_text, patient_context)
-        ai_response = await ai_assistant.get_ai_assessment(prompt)
+        previous_assessment = latest_assessment.get('assessment_data') if latest_assessment else None
         
-        # Save upload record
-        upload_data = {
+        # Analyze report with Gemini AI
+        report_data = {
+            'extracted_text': extraction_result['extracted_text'],
+            'structured_data': extraction_result.get('structured_data', {}),
+            'report_type': report_type,
+            'upload_date': datetime.utcnow().isoformat(),
+            'upload_id': str(ObjectId())
+        }
+        
+        logger.info("Analyzing medical report with Gemini AI...")
+        ai_analysis = asyncio.run(gemini_service.analyze_medical_report(
+            report_data, 
+            patient_context, 
+            previous_assessment
+        ))
+        
+        # Save upload record with AI analysis
+        uploads_collection = db_manager.get_collection('medical_uploads')
+        upload_record = {
             'user_id': ObjectId(user_id),
             'filename': filename,
+            'original_filename': file.filename,
             'file_path': file_path,
             'report_type': report_type,
             'description': description,
-            'extracted_text': extracted_text,
-            'ai_analysis': ai_response['assessment'] if ai_response['success'] else None,
-            'created_at': datetime.utcnow()
+            'extraction_result': extraction_result,
+            'ai_analysis': ai_analysis,
+            'file_metadata': {
+                'size': os.path.getsize(file_path),
+                'mime_type': file.content_type,
+                'upload_timestamp': datetime.utcnow()
+            },
+            'created_at': datetime.utcnow(),
+            'status': 'processed'
         }
         
-        result = medical_uploads_collection.insert_one(upload_data)
+        upload_result = uploads_collection.insert_one(upload_record)
+        
+        logger.info(f"Medical report processed and analyzed: {upload_result.inserted_id}")
         
         return jsonify({
-            'upload_id': str(result.inserted_id),
-            'extracted_text': extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text,
-            'ai_analysis': ai_response['assessment'] if ai_response['success'] else None
+            'success': True,
+            'upload_id': str(upload_result.inserted_id),
+            'extracted_text': extraction_result['extracted_text'][:500] + "..." if len(extraction_result['extracted_text']) > 500 else extraction_result['extracted_text'],
+            'ai_analysis': ai_analysis,
+            'file_info': {
+                'filename': filename,
+                'size': upload_record['file_metadata']['size'],
+                'type': report_type
+            },
+            'message': 'Medical report uploaded and analyzed successfully'
         }), 201
         
     except Exception as e:
-        logger.error(f"Upload error: {e}")
-        return jsonify({'error': 'Upload failed'}), 500
+        logger.error(f"Medical report upload failed: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Upload and analysis failed',
+            'details': str(e)
+        }), 500
 
-# Healthcare Provider Routes
+# Healthcare Provider Search Routes
 @app.route('/api/find-healthcare', methods=['POST'])
 @jwt_required()
-def find_healthcare():
+def find_healthcare_providers():
+    """Find healthcare providers based on patient needs"""
     try:
         user_id = get_jwt_identity()
         data = request.json
         
-        location = data.get('location')
-        condition_urgency = data.get('urgency', 'ROUTINE')
-        financial_capability = data.get('financial_capability', 'medium')
+        # Get latest medical assessment for context
+        reports_collection = db_manager.get_collection('ai_reports')
+        latest_assessment = reports_collection.find_one(
+            {'user_id': ObjectId(user_id)},
+            sort=[('created_at', -1)]
+        )
         
-        results = find_nearby_healthcare(location, condition_urgency, financial_capability)
+        medical_profile = {}
+        if latest_assessment:
+            assessment_data = latest_assessment.get('assessment_data', {})
+            medical_profile = {
+                'primary_diagnosis': assessment_data.get('preliminary_assessment', {}).get('primary_diagnosis'),
+                'urgency_level': assessment_data.get('preliminary_assessment', {}).get('urgency_level'),
+                'specialist_needed': assessment_data.get('referral_recommendations', {}).get('specialist_needed', []),
+                'financial_capability': data.get('financial_capability', 'medium'),
+                'location': data.get('location', '')
+            }
         
-        return jsonify(results), 200
+        # Search for healthcare providers
+        logger.info(f"Searching healthcare providers for user: {user_id}")
+        
+        search_results = asyncio.run(healthcare_finder.find_providers(
+            data.get('location', ''),
+            medical_profile,
+            data.get('financial_capability', 'medium'),
+            data.get('urgency', 'routine')
+        ))
+        
+        if not search_results.get('success'):
+            return jsonify(search_results), 400
+        
+        # Get provider recommendations from Gemini AI
+        if search_results['providers']:
+            logger.info("Getting AI provider recommendations...")
+            ai_recommendations = asyncio.run(gemini_service.get_provider_recommendations(
+                medical_profile,
+                search_results['providers']
+            ))
+            search_results['ai_recommendations'] = ai_recommendations
+        
+        logger.info(f"Found {search_results.get('total_found', 0)} healthcare providers")
+        
+        return jsonify(search_results), 200
         
     except Exception as e:
-        logger.error(f"Healthcare finder error: {e}")
-        return jsonify({'error': 'Failed to find healthcare providers'}), 500
+        logger.error(f"Healthcare provider search failed: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Provider search failed',
+            'details': str(e)
+        }), 500
 
 # Dashboard Routes
 @app.route('/api/dashboard', methods=['GET'])
 @jwt_required()
 def get_dashboard_data():
+    """Get comprehensive dashboard data for patient"""
     try:
         user_id = get_jwt_identity()
         
         # Get recent intake forms
-        recent_forms = list(intake_forms_collection.find(
+        intake_collection = db_manager.get_collection('intake_forms')
+        recent_forms = list(intake_collection.find(
             {'user_id': ObjectId(user_id)}
-        ).sort('created_at', -1).limit(5))
+        ).sort('created_at', -1).limit(10))
         
         # Get AI reports
-        ai_reports = list(ai_reports_collection.find(
+        reports_collection = db_manager.get_collection('ai_reports')
+        ai_reports = list(reports_collection.find(
             {'user_id': ObjectId(user_id)}
-        ).sort('created_at', -1).limit(10))
+        ).sort('created_at', -1).limit(20))
         
         # Get medical uploads
-        uploads = list(medical_uploads_collection.find(
+        uploads_collection = db_manager.get_collection('medical_uploads')
+        medical_uploads = list(uploads_collection.find(
             {'user_id': ObjectId(user_id)}
-        ).sort('created_at', -1).limit(10))
+        ).sort('created_at', -1).limit(15))
         
-        # Convert ObjectIds to strings
-        for item in recent_forms + ai_reports + uploads:
-            item['_id'] = str(item['_id'])
-            item['user_id'] = str(item['user_id'])
+        # Get user profile
+        users_collection = db_manager.get_collection('users')
+        user_profile = users_collection.find_one({'_id': ObjectId(user_id)})
         
-        return jsonify({
-            'recent_forms': recent_forms,
-            'ai_reports': ai_reports,
-            'medical_uploads': uploads,
+        # Calculate health metrics
+        health_metrics = calculate_health_metrics(ai_reports, medical_uploads)
+        
+        # Serialize all data
+        dashboard_data = {
+            'user_profile': serialize_mongo_doc(user_profile) if user_profile else None,
+            'recent_forms': [serialize_mongo_doc(form) for form in recent_forms],
+            'ai_reports': [serialize_mongo_doc(report) for report in ai_reports],
+            'medical_uploads': [serialize_mongo_doc(upload) for upload in medical_uploads],
+            'health_metrics': health_metrics,
             'summary': {
                 'total_assessments': len(ai_reports),
-                'total_uploads': len(uploads),
-                'last_assessment': ai_reports[0]['created_at'] if ai_reports else None
+                'total_uploads': len(medical_uploads),
+                'last_assessment': ai_reports[0]['created_at'].isoformat() if ai_reports else None,
+                'health_score': health_metrics.get('overall_score', 75),
+                'risk_level': health_metrics.get('risk_level', 'Low')
             }
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': dashboard_data
         }), 200
         
     except Exception as e:
-        logger.error(f"Dashboard error: {e}")
-        return jsonify({'error': 'Failed to load dashboard'}), 500
-
-# Payment Routes
-@app.route('/api/create-payment-intent', methods=['POST'])
-@jwt_required()
-def create_payment_intent():
-    try:
-        user_id = get_jwt_identity()
-        data = request.json
-        
-        amount = data.get('amount')  # in cents
-        service_type = data.get('service_type')
-        
-        # Create Stripe payment intent
-        intent = stripe.PaymentIntent.create(
-            amount=amount,
-            currency='usd',
-            metadata={
-                'user_id': user_id,
-                'service_type': service_type
-            }
-        )
-        
+        logger.error(f"Dashboard data retrieval failed: {e}")
         return jsonify({
-            'client_secret': intent.client_secret,
-            'payment_intent_id': intent.id
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Payment intent error: {e}")
-        return jsonify({'error': 'Failed to create payment intent'}), 500
+            'success': False,
+            'error': 'Failed to load dashboard data',
+            'details': str(e)
+        }), 500
 
-# Admin Routes (for managing doctors and hospitals)
-@app.route('/api/admin/add-doctor', methods=['POST'])
-@jwt_required()
-def add_doctor():
+def calculate_health_metrics(ai_reports: list, medical_uploads: list) -> Dict:
+    """Calculate health metrics from patient data"""
     try:
-        data = request.json
-        
-        doctor_data = {
-            'name': data['name'],
-            'specialization': data['specialization'],
-            'qualifications': data['qualifications'],
-            'experience': data['experience'],
-            'location': {
-                'type': 'Point',
-                'coordinates': [data['longitude'], data['latitude']]
-            },
-            'address': data['address'],
-            'phone': data['phone'],
-            'email': data['email'],
-            'consultation_fee': data['consultation_fee'],
-            'cost_category': data['cost_category'],
-            'availability': data['availability'],
-            'rating': data.get('rating', 0),
-            'created_at': datetime.utcnow()
+        metrics = {
+            'overall_score': 75,  # Default score
+            'risk_level': 'Low',
+            'trend': 'Stable',
+            'last_assessment_date': None,
+            'improvement_areas': [],
+            'positive_indicators': []
         }
         
-        result = doctors_collection.insert_one(doctor_data)
+        if ai_reports:
+            latest_report = ai_reports[0]
+            assessment_data = latest_report.get('assessment_data', {})
+            
+            # Extract urgency level
+            urgency = assessment_data.get('preliminary_assessment', {}).get('urgency_level', 'LOW')
+            
+            # Calculate score based on urgency and other factors
+            if urgency == 'EMERGENCY':
+                metrics['overall_score'] = 30
+                metrics['risk_level'] = 'Critical'
+            elif urgency == 'HIGH':
+                metrics['overall_score'] = 50
+                metrics['risk_level'] = 'High'
+            elif urgency == 'MEDIUM':
+                metrics['overall_score'] = 70
+                metrics['risk_level'] = 'Medium'
+            else:
+                metrics['overall_score'] = 85
+                metrics['risk_level'] = 'Low'
+            
+            metrics['last_assessment_date'] = latest_report['created_at'].isoformat()
+            
+            # Extract improvement areas
+            lifestyle_recs = assessment_data.get('lifestyle_recommendations', {})
+            if lifestyle_recs.get('diet_modifications'):
+                metrics['improvement_areas'].append('Diet optimization')
+            if lifestyle_recs.get('exercise_plan'):
+                metrics['improvement_areas'].append('Physical activity')
+            if lifestyle_recs.get('stress_management'):
+                metrics['improvement_areas'].append('Stress management')
         
-        return jsonify({
-            'doctor_id': str(result.inserted_id),
-            'message': 'Doctor added successfully'
-        }), 201
+        return metrics
         
     except Exception as e:
-        logger.error(f"Add doctor error: {e}")
-        return jsonify({'error': 'Failed to add doctor'}), 500
-
-@app.route('/api/admin/add-hospital', methods=['POST'])
-@jwt_required()
-def add_hospital():
-    try:
-        data = request.json
-        
-        hospital_data = {
-            'name': data['name'],
-            'type': data['type'],  # government, private, specialty
-            'specialties': data['specialties'],
-            'location': {
-                'type': 'Point',
-                'coordinates': [data['longitude'], data['latitude']]
-            },
-            'address': data['address'],
-            'phone': data['phone'],
-            'email': data['email'],
-            'emergency_services': data['emergency_services'],
-            'cost_category': data['cost_category'],
-            'facilities': data['facilities'],
-            'rating': data.get('rating', 0),
-            'bed_capacity': data['bed_capacity'],
-            'created_at': datetime.utcnow()
+        logger.error(f"Health metrics calculation failed: {e}")
+        return {
+            'overall_score': 75,
+            'risk_level': 'Unknown',
+            'trend': 'Stable'
         }
-        
-        result = hospitals_collection.insert_one(hospital_data)
-        
-        return jsonify({
-            'hospital_id': str(result.inserted_id),
-            'message': 'Hospital added successfully'
-        }), 201
-        
-    except Exception as e:
-        logger.error(f"Add hospital error: {e}")
-        return jsonify({'error': 'Failed to add hospital'}), 500
 
-# Health check
+# Health check endpoint
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'services': {
-            'mongodb': 'connected',
-            'gemini_api': 'configured',
-            'stripe': 'configured'
-        }
-    }), 200
+    """System health check"""
+    try:
+        # Test database connection
+        db_manager.get_collection('users').find_one()
+        
+        # Test Gemini API
+        gemini_status = 'configured' if gemini_service.api_key else 'not_configured'
+        
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'services': {
+                'mongodb': 'connected',
+                'redis': 'connected' if db_manager.redis_client else 'not_available',
+                'gemini_api': gemini_status,
+                'file_processor': 'ready',
+                'healthcare_finder': 'ready'
+            },
+            'version': '2.0.0'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
+
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    return jsonify({'error': 'Token has expired'}), 401
+
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    return jsonify({'error': 'Invalid token'}), 401
 
 if __name__ == '__main__':
-    # Create upload directory
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    # Create upload directories
+    os.makedirs('uploads', exist_ok=True)
     
-    # Create database indexes
-    users_collection.create_index('email', unique=True)
-    intake_forms_collection.create_index('user_id')
-    ai_reports_collection.create_index('user_id')
-    medical_uploads_collection.create_index('user_id')
-    doctors_collection.create_index([('location', '2dsphere')])
-    hospitals_collection.create_index([('location', '2dsphere')])
+    logger.info("🏥" + "=" * 80)
+    logger.info("🤖 AI VIRTUAL HOSPITAL - PRODUCTION BACKEND")
+    logger.info("🏥" + "=" * 80)
+    logger.info("🔗 Gemini AI Integration: Enabled")
+    logger.info("🗄️ MongoDB Database: Connected")
+    logger.info("📁 File Processing: OCR + Text Extraction")
+    logger.info("🌍 Healthcare Finder: Google Maps + Database")
+    logger.info("🔐 JWT Authentication: Enabled")
+    logger.info("📊 Real-time Analytics: Enabled")
+    logger.info("🏥" + "=" * 80)
     
-    logger.info("🏥 Virtual Hospital Backend Starting...")
-    logger.info("🤖 Gemini AI Integration: Enabled")
-    logger.info("💳 Stripe Payments: Enabled")
-    logger.info("📱 SMS Notifications: Enabled")
-    logger.info("🗄️ MongoDB: Connected")
-    
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 3002)), debug=True)
+    # Run Flask app
+    port = int(os.getenv('PORT', 3002))
+    app.run(
+        host='0.0.0.0', 
+        port=port, 
+        debug=os.getenv('NODE_ENV') != 'production',
+        threaded=True
+    )
