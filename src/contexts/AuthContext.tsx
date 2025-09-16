@@ -1,21 +1,13 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
 
 interface User {
   id: string;
   email: string;
   firstName: string;
   lastName: string;
-  role: 'patient' | 'family_member';
-  patientId?: string;
+  role: 'patient' | 'doctor' | 'admin';
   phone?: string;
   dateOfBirth?: string;
-  emergencyContact?: string;
-  medicalHistory?: string[];
-  allergies?: string[];
-  currentMedications?: string[];
-  insuranceProvider?: string;
-  insuranceNumber?: string;
 }
 
 interface AuthContextType {
@@ -24,7 +16,6 @@ interface AuthContextType {
   signUp: (email: string, password: string, userData: Partial<User>) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
-  updateProfile: (userData: Partial<User>) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -42,118 +33,111 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check if Supabase is properly configured before attempting connection
-    if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
-      console.error('Supabase configuration is missing. Please check your .env file.');
+    // Check for existing token
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetchUserProfile();
+    } else {
       setLoading(false);
-      return;
     }
-
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session }, error }) => {
-      if (error) {
-        console.error('Error getting session (check Supabase configuration):', error);
-        setLoading(false);
-        return;
-      }
-      
-      if (session?.user) {
-        fetchUserProfile(session.user.id);
-      } else {
-        setLoading(false);
-      }
-    }).catch((error) => {
-      console.error('Failed to get session (network or configuration error):', error);
-      setLoading(false);
-    });
-
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (session?.user) {
-          await fetchUserProfile(session.user.id);
-        } else {
-          setUser(null);
-          setLoading(false);
-        }
-      }
-    );
-
-    return () => subscription.unsubscribe();
   }, []);
 
-  const fetchUserProfile = async (userId: string) => {
+  const fetchUserProfile = async () => {
     try {
-      // Check if Supabase is properly configured
-      if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
-        throw new Error('Supabase configuration is missing. Please check your environment variables.');
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/profile`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (response.ok) {
+        const userData = await response.json();
+        setUser({
+          id: userData.user._id,
+          email: userData.user.email,
+          firstName: userData.user.profile?.firstName || '',
+          lastName: userData.user.profile?.lastName || '',
+          role: userData.user.profile?.role || 'patient',
+          phone: userData.user.profile?.phone || '',
+          dateOfBirth: userData.user.profile?.dateOfBirth || ''
+        });
+      } else {
+        localStorage.removeItem('token');
       }
-
-      const { data, error } = await supabase
-        .from('user_profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      if (error) throw error;
-
-      setUser(data);
     } catch (error) {
       console.error('Error fetching user profile:', error);
-      // Don't throw error, just log it and continue
+      localStorage.removeItem('token');
     } finally {
       setLoading(false);
     }
   };
 
   const signUp = async (email: string, password: string, userData: Partial<User>) => {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        email,
+        password,
+        ...userData
+      })
     });
 
-    if (error) throw error;
+    const data = await response.json();
 
-    if (data.user) {
-      // Create user profile
-      const { error: profileError } = await supabase
-        .from('user_profiles')
-        .insert({
-          id: data.user.id,
-          email,
-          ...userData,
-        });
-
-      if (profileError) throw profileError;
+    if (!response.ok) {
+      throw new Error(data.error || 'Registration failed');
     }
+
+    // Store token and user data
+    localStorage.setItem('token', data.token);
+    setUser({
+      id: data.user._id,
+      email,
+      firstName: data.user.profile?.firstName || '',
+      lastName: data.user.profile?.lastName || '',
+      role: data.user.profile?.role || 'patient',
+      phone: data.user.profile?.phone || '',
+      dateOfBirth: data.user.profile?.dateOfBirth || ''
+    });
   };
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        email,
+        password
+      })
     });
 
-    if (error) throw error;
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Login failed');
+    }
+
+    // Store token and user data
+    localStorage.setItem('token', data.token);
+    setUser({
+      id: data.user._id,
+      email,
+      firstName: data.user.profile?.firstName || '',
+      lastName: data.user.profile?.lastName || '',
+      role: data.user.profile?.role || 'patient',
+      phone: data.user.profile?.phone || '',
+      dateOfBirth: data.user.profile?.dateOfBirth || ''
+    });
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+    localStorage.removeItem('token');
     setUser(null);
-  };
-
-  const updateProfile = async (userData: Partial<User>) => {
-    if (!user) throw new Error('No user logged in');
-
-    const { error } = await supabase
-      .from('user_profiles')
-      .update(userData)
-      .eq('id', user.id);
-
-    if (error) throw error;
-
-    setUser({ ...user, ...userData });
   };
 
   const value = {
@@ -162,7 +146,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     signUp,
     signIn,
     signOut,
-    updateProfile,
   };
 
   return (
