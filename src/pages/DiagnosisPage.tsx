@@ -16,7 +16,12 @@ import {
   Clock,
   User,
   Bookmark,
-  RefreshCw
+  RefreshCw,
+  Eye,
+  Filter,
+  Search,
+  Star,
+  Shield
 } from 'lucide-react';
 
 interface DiagnosisReport {
@@ -26,6 +31,9 @@ interface DiagnosisReport {
   created_at: string;
   status: string;
   report_type: string;
+  confidence_score: number;
+  urgency_level: string;
+  primary_diagnosis: string;
 }
 
 export const DiagnosisPage: React.FC = () => {
@@ -34,6 +42,9 @@ export const DiagnosisPage: React.FC = () => {
   const [selectedReport, setSelectedReport] = useState<DiagnosisReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('recent');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterUrgency, setFilterUrgency] = useState('all');
+  const [sortBy, setSortBy] = useState('date_desc');
 
   useEffect(() => {
     loadDiagnosisReports();
@@ -55,11 +66,23 @@ export const DiagnosisPage: React.FC = () => {
 
       if (response.ok) {
         const data = await response.json();
-        setReports(data.reports || []);
+        const processedReports = (data.reports || []).map((report: any) => ({
+          id: report._id || report.id,
+          patient_id: report.user_id,
+          assessment_data: report.assessment_data,
+          created_at: report.created_at,
+          status: report.status || 'completed',
+          report_type: report.report_type || 'triage_assessment',
+          confidence_score: report.assessment_data?.preliminary_assessment?.confidence_score || 0,
+          urgency_level: report.assessment_data?.preliminary_assessment?.urgency_level || 'LOW',
+          primary_diagnosis: report.assessment_data?.preliminary_assessment?.primary_diagnosis || 'Medical Assessment'
+        }));
+        
+        setReports(processedReports);
         
         // Auto-select the most recent report
-        if (data.reports && data.reports.length > 0) {
-          setSelectedReport(data.reports[0]);
+        if (processedReports.length > 0) {
+          setSelectedReport(processedReports[0]);
         }
       }
     } catch (error) {
@@ -79,7 +102,18 @@ export const DiagnosisPage: React.FC = () => {
 
       if (response.ok) {
         const report = await response.json();
-        setSelectedReport(report);
+        const processedReport = {
+          id: report._id || report.id,
+          patient_id: report.user_id,
+          assessment_data: report.assessment_data,
+          created_at: report.created_at,
+          status: report.status || 'completed',
+          report_type: report.report_type || 'triage_assessment',
+          confidence_score: report.assessment_data?.preliminary_assessment?.confidence_score || 0,
+          urgency_level: report.assessment_data?.preliminary_assessment?.urgency_level || 'LOW',
+          primary_diagnosis: report.assessment_data?.preliminary_assessment?.primary_diagnosis || 'Medical Assessment'
+        };
+        setSelectedReport(processedReport);
         setActiveTab('current');
       }
     } catch (error) {
@@ -97,6 +131,12 @@ export const DiagnosisPage: React.FC = () => {
     }
   };
 
+  const getConfidenceColor = (confidence: number) => {
+    if (confidence >= 0.8) return 'text-green-600';
+    if (confidence >= 0.6) return 'text-yellow-600';
+    return 'text-red-600';
+  };
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       year: 'numeric',
@@ -107,35 +147,88 @@ export const DiagnosisPage: React.FC = () => {
     });
   };
 
+  const filteredReports = reports.filter(report => {
+    const matchesSearch = report.primary_diagnosis.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         report.assessment_data?.clinical_analysis?.probable_causes?.some((cause: string) => 
+                           cause.toLowerCase().includes(searchTerm.toLowerCase()));
+    
+    const matchesUrgency = filterUrgency === 'all' || report.urgency_level.toLowerCase() === filterUrgency;
+    
+    return matchesSearch && matchesUrgency;
+  });
+
+  const sortedReports = [...filteredReports].sort((a, b) => {
+    switch (sortBy) {
+      case 'date_desc':
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      case 'date_asc':
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      case 'confidence_desc':
+        return b.confidence_score - a.confidence_score;
+      case 'urgency_desc':
+        const urgencyOrder = { 'EMERGENCY': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1 };
+        return (urgencyOrder[b.urgency_level as keyof typeof urgencyOrder] || 0) - 
+               (urgencyOrder[a.urgency_level as keyof typeof urgencyOrder] || 0);
+      default:
+        return 0;
+    }
+  });
+
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
           <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading your diagnosis reports...</p>
+          <p className="text-gray-600 text-lg">Loading your medical assessments...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen py-8 px-4 sm:px-6 lg:px-8 bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen py-8 px-4 sm:px-6 lg:px-8 bg-gray-50">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
+        {/* Enhanced Header */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className="text-center mb-8"
         >
-          <div className="bg-gradient-to-r from-blue-600 to-purple-600 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-6">
-            <Brain className="w-10 h-10 text-white" />
+          <div className="bg-gradient-to-r from-blue-600 to-purple-600 w-24 h-24 rounded-3xl flex items-center justify-center mx-auto mb-6">
+            <Brain className="w-12 h-12 text-white" />
           </div>
           <h1 className="text-4xl font-bold text-gray-900 mb-3">AI Diagnosis Center</h1>
           <p className="text-xl text-gray-600">Your comprehensive medical assessments and AI-powered insights</p>
+          
+          {/* Quick Stats */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-8">
+            <div className="bg-white rounded-xl p-4 shadow-md">
+              <div className="text-2xl font-bold text-blue-600">{reports.length}</div>
+              <div className="text-sm text-gray-600">Total Assessments</div>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-md">
+              <div className="text-2xl font-bold text-green-600">
+                {reports.filter(r => r.urgency_level === 'LOW').length}
+              </div>
+              <div className="text-sm text-gray-600">Low Priority</div>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-md">
+              <div className="text-2xl font-bold text-orange-600">
+                {reports.filter(r => ['MEDIUM', 'HIGH'].includes(r.urgency_level)).length}
+              </div>
+              <div className="text-sm text-gray-600">Needs Attention</div>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-md">
+              <div className="text-2xl font-bold text-purple-600">
+                {Math.round(reports.reduce((acc, r) => acc + r.confidence_score, 0) / reports.length * 100) || 0}%
+              </div>
+              <div className="text-sm text-gray-600">Avg Confidence</div>
+            </div>
+          </div>
         </motion.div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-          {/* Sidebar - Reports List */}
+          {/* Enhanced Sidebar */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -152,51 +245,66 @@ export const DiagnosisPage: React.FC = () => {
                 </button>
               </div>
 
-              {/* Tabs */}
-              <div className="flex space-x-1 mb-4 bg-gray-100 rounded-lg p-1">
-                <button
-                  onClick={() => setActiveTab('recent')}
-                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-all duration-200 ${
-                    activeTab === 'recent'
-                      ? 'bg-white text-blue-600 shadow-sm'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  Recent
-                </button>
-                <button
-                  onClick={() => setActiveTab('all')}
-                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-all duration-200 ${
-                    activeTab === 'all'
-                      ? 'bg-white text-blue-600 shadow-sm'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  All Reports
-                </button>
+              {/* Search and Filters */}
+              <div className="space-y-4 mb-6">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Search reports..."
+                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={filterUrgency}
+                    onChange={(e) => setFilterUrgency(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="all">All Urgency</option>
+                    <option value="emergency">Emergency</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                  </select>
+
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="date_desc">Newest First</option>
+                    <option value="date_asc">Oldest First</option>
+                    <option value="confidence_desc">High Confidence</option>
+                    <option value="urgency_desc">High Urgency</option>
+                  </select>
+                </div>
               </div>
 
               {/* Reports List */}
               <div className="space-y-3 max-h-96 overflow-y-auto">
-                {reports.length === 0 ? (
+                {sortedReports.length === 0 ? (
                   <div className="text-center py-8">
                     <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                    <p className="text-gray-600 text-sm">No diagnosis reports yet</p>
+                    <p className="text-gray-600 text-sm">No reports found</p>
                     <button
                       onClick={() => window.location.href = '/intake-form'}
                       className="mt-3 text-blue-600 text-sm font-medium hover:text-blue-700"
                     >
-                      Complete Intake Form →
+                      Complete New Assessment →
                     </button>
                   </div>
                 ) : (
-                  reports.map((report) => (
+                  sortedReports.map((report) => (
                     <div
                       key={report.id}
                       onClick={() => setSelectedReport(report)}
                       className={`p-4 rounded-xl cursor-pointer transition-all duration-200 border-2 ${
                         selectedReport?.id === report.id
-                          ? 'bg-blue-50 border-blue-300'
+                          ?   'bg-blue-50 border-blue-300 shadow-md'
                           : 'bg-gray-50 border-gray-200 hover:bg-blue-50 hover:border-blue-200'
                       }`}
                     >
@@ -206,17 +314,21 @@ export const DiagnosisPage: React.FC = () => {
                         </div>
                         <div className="flex-1 min-w-0">
                           <h4 className="font-semibold text-gray-900 text-sm truncate">
-                            {report.assessment_data?.preliminary_assessment?.primary_diagnosis || 'Medical Assessment'}
+                            {report.primary_diagnosis}
                           </h4>
                           <p className="text-xs text-gray-600 mt-1">
                             {formatDate(report.created_at)}
                           </p>
-                          <div className="mt-2">
-                            <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
-                              getUrgencyColor(report.assessment_data?.preliminary_assessment?.urgency_level || 'LOW')
-                            }`}>
-                              {report.assessment_data?.preliminary_assessment?.urgency_level || 'LOW'}
+                          <div className="flex items-center space-x-2 mt-2">
+                            <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium border ${getUrgencyColor(report.urgency_level)}`}>
+                              {report.urgency_level}
                             </span>
+                            <div className="flex items-center space-x-1">
+                              <Star className="w-3 h-3 text-yellow-500" />
+                              <span className={`text-xs font-medium ${getConfidenceColor(report.confidence_score)}`}>
+                                {Math.round(report.confidence_score * 100)}%
+                              </span>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -224,10 +336,28 @@ export const DiagnosisPage: React.FC = () => {
                   ))
                 )}
               </div>
+
+              {/* Quick Actions */}
+              <div className="mt-6 space-y-3">
+                <button
+                  onClick={() => window.location.href = '/intake-form'}
+                  className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-4 rounded-xl font-semibold hover:shadow-lg transition-all duration-200 flex items-center justify-center space-x-2"
+                >
+                  <Brain className="w-5 h-5" />
+                  <span>New Assessment</span>
+                </button>
+                <button
+                  onClick={() => window.location.href = '/upload-reports'}
+                  className="w-full bg-green-600 text-white py-3 px-4 rounded-xl font-semibold hover:bg-green-700 transition-all duration-200 flex items-center justify-center space-x-2"
+                >
+                  <FileText className="w-5 h-5" />
+                  <span>Upload Reports</span>
+                </button>
+              </div>
             </div>
           </motion.div>
 
-          {/* Main Content - Selected Report */}
+          {/* Enhanced Main Content */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -241,7 +371,7 @@ export const DiagnosisPage: React.FC = () => {
                   <div className="flex items-center justify-between mb-6">
                     <div>
                       <h2 className="text-3xl font-bold text-gray-900 mb-2">
-                        {selectedReport.assessment_data?.preliminary_assessment?.primary_diagnosis || 'Medical Assessment'}
+                        {selectedReport.primary_diagnosis}
                       </h2>
                       <div className="flex items-center space-x-4 text-gray-600">
                         <div className="flex items-center space-x-1">
@@ -252,29 +382,29 @@ export const DiagnosisPage: React.FC = () => {
                           <User className="w-4 h-4" />
                           <span>Report ID: {selectedReport.id.slice(0, 8)}</span>
                         </div>
+                        <div className="flex items-center space-x-1">
+                          <Shield className="w-4 h-4" />
+                          <span>AI Powered</span>
+                        </div>
                       </div>
                     </div>
-                    <div className="flex items-center space-x-3">
+                    <div className="flex items-center space-x-4">
                       <div className="text-right">
                         <div className="text-sm text-gray-600 mb-1">AI Confidence</div>
                         <div className="flex items-center space-x-2">
                           <div className="bg-gray-200 rounded-full h-2 w-24">
                             <div 
-                              className="bg-blue-500 h-2 rounded-full"
-                              style={{ 
-                                width: `${(selectedReport.assessment_data?.preliminary_assessment?.confidence_score || 0) * 100}%` 
-                              }}
+                              className="bg-blue-500 h-2 rounded-full transition-all duration-1000"
+                              style={{ width: `${selectedReport.confidence_score * 100}%` }}
                             />
                           </div>
-                          <span className="font-bold text-lg">
-                            {Math.round((selectedReport.assessment_data?.preliminary_assessment?.confidence_score || 0) * 100)}%
+                          <span className={`font-bold text-lg ${getConfidenceColor(selectedReport.confidence_score)}`}>
+                            {Math.round(selectedReport.confidence_score * 100)}%
                           </span>
                         </div>
                       </div>
-                      <div className={`px-4 py-2 rounded-xl border-2 font-semibold ${
-                        getUrgencyColor(selectedReport.assessment_data?.preliminary_assessment?.urgency_level || 'LOW')
-                      }`}>
-                        {selectedReport.assessment_data?.preliminary_assessment?.urgency_level || 'LOW'} Priority
+                      <div className={`px-4 py-2 rounded-xl border-2 font-semibold ${getUrgencyColor(selectedReport.urgency_level)}`}>
+                        {selectedReport.urgency_level} Priority
                       </div>
                     </div>
                   </div>
@@ -303,9 +433,9 @@ export const DiagnosisPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Assessment Overview */}
+                {/* Assessment Overview Cards */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="bg-white rounded-2xl shadow-lg p-6">
+                  <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-blue-500">
                     <div className="flex items-center space-x-3 mb-4">
                       <div className="bg-blue-100 p-3 rounded-xl">
                         <Heart className="w-6 h-6 text-blue-600" />
@@ -317,7 +447,7 @@ export const DiagnosisPage: React.FC = () => {
                     </p>
                   </div>
 
-                  <div className="bg-white rounded-2xl shadow-lg p-6">
+                  <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-purple-500">
                     <div className="flex items-center space-x-3 mb-4">
                       <div className="bg-purple-100 p-3 rounded-xl">
                         <Brain className="w-6 h-6 text-purple-600" />
@@ -329,7 +459,7 @@ export const DiagnosisPage: React.FC = () => {
                     </p>
                   </div>
 
-                  <div className="bg-white rounded-2xl shadow-lg p-6">
+                  <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-green-500">
                     <div className="flex items-center space-x-3 mb-4">
                       <div className="bg-green-100 p-3 rounded-xl">
                         <TrendingUp className="w-6 h-6 text-green-600" />
@@ -376,15 +506,12 @@ export const DiagnosisPage: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="mt-6">
-                      <h4 className="font-bold text-gray-900 mb-3">Alternative Diagnoses</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {selectedReport.assessment_data?.clinical_analysis?.differential_diagnosis?.map((diagnosis: string, index: number) => (
-                          <div key={index} className="p-3 bg-blue-50 rounded-lg border border-blue-200 text-center">
-                            <span className="text-blue-800 font-medium">{diagnosis}</span>
-                          </div>
-                        )) || <p className="text-gray-500">No alternative diagnoses suggested</p>}
-                      </div>
+                    {/* Clinical Reasoning */}
+                    <div className="mt-6 bg-blue-50 rounded-xl p-6">
+                      <h4 className="font-bold text-blue-900 mb-3">Clinical Reasoning</h4>
+                      <p className="text-blue-800 leading-relaxed">
+                        {selectedReport.assessment_data?.preliminary_assessment?.clinical_reasoning || 'Detailed clinical reasoning provided by AI analysis'}
+                      </p>
                     </div>
                   </div>
 
@@ -427,7 +554,7 @@ export const DiagnosisPage: React.FC = () => {
 
                     <div className="mt-6">
                       <h4 className="font-bold text-gray-900 mb-4 flex items-center space-x-2">
-                        <Stethoscope className="w-5 h-5 text-green-600" />
+                        <User className="w-5 h-5 text-green-600" />
                         <span>Specialist Consultations</span>
                       </h4>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -438,12 +565,76 @@ export const DiagnosisPage: React.FC = () => {
                         )) || <p className="text-gray-500">No specialist consultations needed at this time</p>}
                       </div>
                     </div>
+
+                    {/* Timeline */}
+                    <div className="mt-6 bg-orange-50 rounded-xl p-6">
+                      <h4 className="font-bold text-orange-900 mb-3 flex items-center space-x-2">
+                        <Clock className="w-5 h-5" />
+                        <span>Investigation Timeline</span>
+                      </h4>
+                      <p className="text-orange-800 font-medium">
+                        {selectedReport.assessment_data?.recommended_investigations?.urgency_timeline || 'Complete investigations as recommended by healthcare provider'}
+                      </p>
+                    </div>
                   </div>
 
-                  {/* Lifestyle Recommendations */}
+                  {/* Treatment Recommendations */}
                   <div className="bg-white rounded-2xl shadow-lg p-8">
                     <h3 className="text-2xl font-bold text-gray-900 mb-6 flex items-center space-x-3">
-                      <Heart className="w-7 h-7 text-red-600" />
+                      <Pill className="w-7 h-7 text-red-600" />
+                      <span>Treatment Recommendations</span>
+                    </h3>
+                    
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-6">
+                      <div className="flex items-start space-x-3">
+                        <AlertTriangle className="w-5 h-5 text-yellow-600 mt-0.5" />
+                        <p className="text-yellow-800 text-sm">
+                          <strong>Important:</strong> These are general treatment categories based on AI analysis. 
+                          Actual prescriptions and treatments require consultation with licensed healthcare professionals.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <h4 className="font-bold text-gray-900 mb-3">Immediate Interventions</h4>
+                        <div className="space-y-2">
+                          {selectedReport.assessment_data?.treatment_recommendations?.immediate_interventions?.map((intervention: string, index: number) => (
+                            <div key={index} className="p-3 bg-red-50 rounded-lg border border-red-200">
+                              <span className="text-red-800">{intervention}</span>
+                            </div>
+                          )) || <p className="text-gray-500">No immediate interventions required</p>}
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="font-bold text-gray-900 mb-3">Medication Categories</h4>
+                        <div className="space-y-2">
+                          {selectedReport.assessment_data?.treatment_recommendations?.medication_categories?.map((category: string, index: number) => (
+                            <div key={index} className="p-3 bg-blue-50 rounded-lg">
+                              <span className="text-blue-800">{category}</span>
+                            </div>
+                          )) || <p className="text-gray-500">No specific medications indicated</p>}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-6">
+                      <h4 className="font-bold text-gray-900 mb-3">Non-Pharmacological Treatments</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {selectedReport.assessment_data?.treatment_recommendations?.non_pharmacological?.map((treatment: string, index: number) => (
+                          <div key={index} className="p-3 bg-green-50 rounded-lg border border-green-200">
+                            <span className="text-green-800">{treatment}</span>
+                          </div>
+                        )) || <p className="text-gray-500">No specific non-drug treatments recommended</p>}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Lifestyle Optimization */}
+                  <div className="bg-white rounded-2xl shadow-lg p-8">
+                    <h3 className="text-2xl font-bold text-gray-900 mb-6 flex items-center space-x-3">
+                      <Heart className="w-7 h-7 text-pink-600" />
                       <span>Personalized Lifestyle Plan</span>
                     </h3>
                     
@@ -451,7 +642,7 @@ export const DiagnosisPage: React.FC = () => {
                       <div>
                         <h4 className="font-bold text-gray-900 mb-3">Diet Modifications</h4>
                         <div className="space-y-2">
-                          {selectedReport.assessment_data?.lifestyle_recommendations?.diet_modifications?.map((diet: string, index: number) => (
+                          {selectedReport.assessment_data?.lifestyle_optimization?.diet_modifications?.map((diet: string, index: number) => (
                             <div key={index} className="flex items-start space-x-2 p-3 bg-green-50 rounded-lg">
                               <div className="w-2 h-2 bg-green-600 rounded-full mt-2"></div>
                               <span className="text-green-800 text-sm">{diet}</span>
@@ -461,9 +652,9 @@ export const DiagnosisPage: React.FC = () => {
                       </div>
 
                       <div>
-                        <h4 className="font-bold text-gray-900 mb-3">Exercise Plan</h4>
+                        <h4 className="font-bold text-gray-900 mb-3">Exercise Prescription</h4>
                         <div className="space-y-2">
-                          {selectedReport.assessment_data?.lifestyle_recommendations?.exercise_plan?.map((exercise: string, index: number) => (
+                          {selectedReport.assessment_data?.lifestyle_optimization?.exercise_prescription?.map((exercise: string, index: number) => (
                             <div key={index} className="flex items-start space-x-2 p-3 bg-blue-50 rounded-lg">
                               <div className="w-2 h-2 bg-blue-600 rounded-full mt-2"></div>
                               <span className="text-blue-800 text-sm">{exercise}</span>
@@ -472,45 +663,29 @@ export const DiagnosisPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Medication Guidance */}
-                  <div className="bg-white rounded-2xl shadow-lg p-8">
-                    <h3 className="text-2xl font-bold text-gray-900 mb-6 flex items-center space-x-3">
-                      <Pill className="w-7 h-7 text-orange-600" />
-                      <span>Medication Guidance</span>
-                    </h3>
-                    
-                    <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 mb-6">
-                      <div className="flex items-start space-x-3">
-                        <AlertTriangle className="w-5 h-5 text-yellow-600 mt-0.5" />
-                        <p className="text-yellow-800 text-sm">
-                          <strong>Important:</strong> These are general medication categories. 
-                          Actual prescriptions require consultation with a licensed physician.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div>
-                        <h4 className="font-bold text-gray-900 mb-3">Over-the-Counter Options</h4>
+                        <h4 className="font-bold text-gray-900 mb-3">Sleep Hygiene</h4>
                         <div className="space-y-2">
-                          {selectedReport.assessment_data?.medication_guidance?.otc_recommendations?.map((med: string, index: number) => (
-                            <div key={index} className="p-3 bg-green-50 rounded-lg">
-                              <span className="text-green-800">{med}</span>
+                          {selectedReport.assessment_data?.lifestyle_optimization?.sleep_hygiene?.map((tip: string, index: number) => (
+                            <div key={index} className="flex items-start space-x-2 p-3 bg-purple-50 rounded-lg">
+                              <div className="w-2 h-2 bg-purple-600 rounded-full mt-2"></div>
+                              <span className="text-purple-800 text-sm">{tip}</span>
                             </div>
-                          )) || <p className="text-gray-500">No specific OTC medications recommended</p>}
+                          )) || <p className="text-gray-500">Maintain good sleep habits</p>}
                         </div>
                       </div>
 
                       <div>
-                        <h4 className="font-bold text-gray-900 mb-3">Prescription Categories</h4>
+                        <h4 className="font-bold text-gray-900 mb-3">Stress Management</h4>
                         <div className="space-y-2">
-                          {selectedReport.assessment_data?.medication_guidance?.prescription_categories?.map((category: string, index: number) => (
-                            <div key={index} className="p-3 bg-blue-50 rounded-lg">
-                              <span className="text-blue-800">{category}</span>
+                          {selectedReport.assessment_data?.lifestyle_optimization?.stress_management?.map((strategy: string, index: number) => (
+                            <div key={index} className="flex items-start space-x-2 p-3 bg-orange-50 rounded-lg">
+                              <div className="w-2 h-2 bg-orange-600 rounded-full mt-2"></div>
+                              <span className="text-orange-800 text-sm">{strategy}</span>
                             </div>
-                          )) || <p className="text-gray-500">No prescription medications indicated</p>}
+                          )) || <p className="text-gray-500">Continue current stress management techniques</p>}
                         </div>
                       </div>
                     </div>
@@ -545,28 +720,48 @@ export const DiagnosisPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
+
+                    <div className="mt-6">
+                      <h4 className="font-bold text-gray-900 mb-3">Symptoms to Monitor</h4>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                        {selectedReport.assessment_data?.follow_up_plan?.symptom_tracking?.map((symptom: string, index: number) => (
+                          <div key={index} className="p-3 bg-yellow-50 rounded-lg border border-yellow-200 text-center">
+                            <span className="text-yellow-800 font-medium">{symptom}</span>
+                          </div>
+                        )) || <p className="text-gray-500">Monitor general symptoms</p>}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             ) : (
               <div className="bg-white rounded-2xl shadow-lg p-12 text-center">
                 <Brain className="w-20 h-20 text-gray-300 mx-auto mb-6" />
-                <h3 className="text-2xl font-bold text-gray-900 mb-4">No Diagnosis Report Selected</h3>
-                <p className="text-gray-600 mb-6">
-                  Select a report from the sidebar to view detailed AI analysis, or complete a new intake form.
+                <h3 className="text-2xl font-bold text-gray-900 mb-4">No Assessment Selected</h3>
+                <p className="text-gray-600 mb-6 text-lg">
+                  Select a report from the sidebar to view detailed AI analysis, or complete a new assessment.
                 </p>
-                <button
-                  onClick={() => window.location.href = '/intake-form'}
-                  className="bg-gradient-to-r from-blue-600 to-purple-600 text-white px-8 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200 flex items-center space-x-2 mx-auto"
-                >
-                  <FileText className="w-5 h-5" />
-                  <span>Complete New Assessment</span>
-                </button>
+                <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                  <button
+                    onClick={() => window.location.href = '/intake-form'}
+                    className="bg-gradient-to-r from-blue-600 to-purple-600 text-white px-8 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200 flex items-center space-x-2"
+                  >
+                    <FileText className="w-5 h-5" />
+                    <span>Complete New Assessment</span>
+                  </button>
+                  <button
+                    onClick={() => window.location.href = '/upload-reports'}
+                    className="bg-green-600 text-white px-8 py-3 rounded-xl font-semibold hover:bg-green-700 transition-all duration-200 flex items-center space-x-2"
+                  >
+                    <FileText className="w-5 h-5" />
+                    <span>Upload Medical Reports</span>
+                  </button>
+                </div>
               </div>
             )}
           </motion.div>
         </div>
       </div>
-    </>
+    </div>
   );
 };
